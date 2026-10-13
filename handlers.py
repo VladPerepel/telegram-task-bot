@@ -1,238 +1,142 @@
+import os
+import random
+import logging
 from aiogram import Router, F
 from aiogram.filters import CommandStart, Command
-from aiogram.types import Message, CallbackQuery
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import StatesGroup, State
+from aiogram.types import Message, CallbackQuery, FSInputFile
+from aiogram.enums import ChatAction
 
-import database
-from keyboards import (
-    get_main_keyboard,
-    get_cancel_keyboard,
-    get_tasks_list_inline_keyboard,
-)
+import music_service
+from keyboards import get_main_keyboard, get_search_results_keyboard
 
+logger = logging.getLogger(__name__)
 router = Router()
 
-
-class TaskStates(StatesGroup):
-    waiting_for_title = State()
+RANDOM_ARTISTS = [
+    "Eminem", "Miyagi", "The Weeknd", "Queen", "Linkin Park",
+    "Imagine Dragons", "Daft Punk", "Billie Eilish", "Nirvana",
+    "Michael Jackson", "Coldplay", "Macan", "Artik & Asti", "Hans Zimmer"
+]
 
 
 # --- START & HELP ---
 
 @router.message(CommandStart())
-async def cmd_start(message: Message, state: FSMContext):
-    await state.clear()
+async def cmd_start(message: Message):
     first_name = message.from_user.first_name if message.from_user else "друг"
     text = (
-        f"👋 Привет, {first_name}!\n\n"
-        "Я **TaskFlow Bot** — твой персональный менеджер задач и привычек.\n\n"
-        "✨ **Что я умею:**\n"
-        "• Сохранять твои задачи и цели\n"
-        "• Отмечать выполненные дела в один клик\n"
-        "• Вести статистику твоей продуктивности\n\n"
-        "Выбери действие в меню ниже или нажми **➕ Новая задача**!"
+        f"🎧 Привет, {first_name}!\n\n"
+        "Я **MusicFlow Bot** — твой персональный поиск музыки в Telegram!\n\n"
+        "🔎 **Как искать музыку:**\n"
+        "Просто отправь мне название любой песни или имя исполнителя "
+        "(например: `Miyagi`, `Eminem`, `Numb`, `Queen`).\n\n"
+        "Нажимай кнопку под результатом, и я мгновенно пришлю аудиозапись! 🎶"
     )
-    await message.answer(
-        text, parse_mode="Markdown", reply_markup=get_main_keyboard()
-    )
+    await message.answer(text, parse_mode="Markdown", reply_markup=get_main_keyboard())
 
 
 @router.message(F.text == "ℹ️ Помощь")
 @router.message(Command("help"))
 async def cmd_help(message: Message):
     text = (
-        "💡 **Как пользоваться ботом:**\n\n"
-        "• **📋 Мои задачи** — просмотр активных дел с быстрыми кнопками завершения и удаления.\n"
-        "• **➕ Новая задача** — добавить дело в список.\n"
-        "• **📊 Статистика** — процент выполненных задач и сводка.\n"
-        "• **📜 Выполненные** — последние завершённые задачи.\n\n"
-        "**Команды в чате:**\n"
-        "/tasks — список задач\n"
-        "/add — быстро добавить задачу\n"
-        "/stats — статистика"
+        "💡 **Инструкция по использованию:**\n\n"
+        "1. Напиши в чат название трека или автора (например: `Believer` или `Macan`).\n"
+        "2. Бот выдаст список найденных треков с их длительностью.\n"
+        "3. Нажми на кнопку нужного трека — бот загрузит MP3 прямо в чат с плеером Telegram!\n\n"
+        "Каждый трек можно слушать онлайн, пересылать друзьям или сохранять в кэш Telegram."
     )
-    await message.answer(
-        text, parse_mode="Markdown", reply_markup=get_main_keyboard()
-    )
+    await message.answer(text, parse_mode="Markdown", reply_markup=get_main_keyboard())
 
 
-# --- CANCEL FSM ---
+# --- QUICK SUGGESTIONS ---
 
-@router.message(F.text == "❌ Отмена")
-async def cancel_handler(message: Message, state: FSMContext):
-    await state.clear()
-    await message.answer(
-        "Действие отменено.", reply_markup=get_main_keyboard()
-    )
+@router.message(F.text == "🔥 Популярная музыка")
+async def cmd_popular(message: Message):
+    await search_and_respond(message, "Top Hits 2024")
 
 
-# --- ADD TASK ---
-
-@router.message(F.text == "➕ Новая задача")
-@router.message(Command("add"))
-async def add_task_start(message: Message, state: FSMContext):
-    await state.set_state(TaskStates.waiting_for_title)
-    await message.answer(
-        "✍️ Напиши название задачи или цели:\n\n_(Или нажми «❌ Отмена»)_",
-        parse_mode="Markdown",
-        reply_markup=get_cancel_keyboard(),
-    )
+@router.message(F.text == "🎲 Случайный хит")
+async def cmd_random_hit(message: Message):
+    artist = random.choice(RANDOM_ARTISTS)
+    await search_and_respond(message, artist)
 
 
-@router.callback_query(F.data == "btn_add_task")
-async def cb_add_task(callback: CallbackQuery, state: FSMContext):
-    await state.set_state(TaskStates.waiting_for_title)
-    await callback.message.answer(
-        "✍️ Введи текст новой задачи:",
-        reply_markup=get_cancel_keyboard(),
-    )
-    await callback.answer()
+# --- GENERAL TEXT SEARCH ---
 
+async def search_and_respond(message: Message, query: str):
+    await message.bot.send_chat_action(chat_id=message.chat.id, action=ChatAction.TYPING)
+    status_msg = await message.answer(f"🔍 Ищу треки по запросу: *{query}*...", parse_mode="Markdown")
 
-@router.message(TaskStates.waiting_for_title)
-async def process_task_title(message: Message, state: FSMContext):
-    title = message.text.strip() if message.text else ""
-    if not title:
-        await message.answer("Текст задачи не может быть пустым. Попробуй снова:")
+    tracks = await music_service.search_tracks(query, limit=6)
+
+    if not tracks:
+        await status_msg.edit_text(
+            f"😔 К сожалению, по запросу *{query}* ничего не найдено.\n"
+            "Попробуй изменить название или имя исполнителя.",
+            parse_mode="Markdown"
+        )
         return
 
-    user_id = message.from_user.id
-    task_id = database.add_task(user_id=user_id, title=title)
-    await state.clear()
+    lines = [f"🎵 **Результаты поиска:** *{query}*\n"]
+    for idx, t in enumerate(tracks, start=1):
+        lines.append(f"**{idx}.** {t['title']} `[{t['duration_str']}]`")
+    lines.append("\n_Нажми на кнопку ниже, чтобы получить трек:_")
 
-    await message.answer(
-        f"✅ Задача #{task_id} сохранена:\n**{title}**",
-        parse_mode="Markdown",
-        reply_markup=get_main_keyboard(),
-    )
+    reply_markup = get_search_results_keyboard(tracks)
+    await status_msg.edit_text("\n".join(lines), parse_mode="Markdown", reply_markup=reply_markup)
 
 
-# --- LIST TASKS ---
-
-def render_tasks_text(tasks: list) -> str:
-    if not tasks:
-        return "🎉 **Все задачи выполнены!**\n\nСписок пуст. Нажми **➕ Новая задача**, чтобы записать дела."
-    lines = ["📋 **Твои активные задачи:**\n"]
-    for idx, t in enumerate(tasks, start=1):
-        lines.append(f"**{idx}.** {t['title']}")
-    lines.append("\n_Нажимай кнопки ниже: [✅ #...] чтобы завершить, [🗑 #...] чтобы удалить._")
-    return "\n".join(lines)
-
-
-@router.message(F.text == "📋 Мои задачи")
-@router.message(Command("tasks"))
-async def show_tasks(message: Message, state: FSMContext):
-    await state.clear()
-    user_id = message.from_user.id
-    tasks = database.get_active_tasks(user_id)
-    text = render_tasks_text(tasks)
-    markup = get_tasks_list_inline_keyboard(tasks) if tasks else None
-    await message.answer(text, parse_mode="Markdown", reply_markup=markup)
-
-
-# --- CALLBACKS (DONE / DELETE / REFRESH) ---
-
-@router.callback_query(F.data.startswith("done:"))
-async def cb_complete_task(callback: CallbackQuery):
-    task_id = int(callback.data.split(":")[1])
-    user_id = callback.from_user.id
-    success = database.complete_task(task_id, user_id)
-
-    if success:
-        await callback.answer("🎉 Задача выполнена!", show_alert=False)
-    else:
-        await callback.answer("Задача не найдена или уже завершена.")
-
-    # Update current message
-    tasks = database.get_active_tasks(user_id)
-    text = render_tasks_text(tasks)
-    markup = get_tasks_list_inline_keyboard(tasks) if tasks else None
-
-    try:
-        await callback.message.edit_text(text, parse_mode="Markdown", reply_markup=markup)
-    except Exception:
-        pass
-
-
-@router.callback_query(F.data.startswith("del:"))
-async def cb_delete_task(callback: CallbackQuery):
-    task_id = int(callback.data.split(":")[1])
-    user_id = callback.from_user.id
-    success = database.delete_task(task_id, user_id)
-
-    if success:
-        await callback.answer("🗑 Задача удалена.")
-    else:
-        await callback.answer("Задача не найдена.")
-
-    tasks = database.get_active_tasks(user_id)
-    text = render_tasks_text(tasks)
-    markup = get_tasks_list_inline_keyboard(tasks) if tasks else None
-
-    try:
-        await callback.message.edit_text(text, parse_mode="Markdown", reply_markup=markup)
-    except Exception:
-        pass
-
-
-@router.callback_query(F.data == "refresh_tasks")
-async def cb_refresh_tasks(callback: CallbackQuery):
-    user_id = callback.from_user.id
-    tasks = database.get_active_tasks(user_id)
-    text = render_tasks_text(tasks)
-    markup = get_tasks_list_inline_keyboard(tasks) if tasks else None
-
-    try:
-        await callback.message.edit_text(text, parse_mode="Markdown", reply_markup=markup)
-        await callback.answer("Обновлено!")
-    except Exception:
-        await callback.answer("Без изменений.")
-
-
-# --- STATS ---
-
-@router.message(F.text == "📊 Статистика")
-@router.message(Command("stats"))
-async def show_stats(message: Message):
-    user_id = message.from_user.id
-    stats = database.get_user_stats(user_id)
-
-    total = stats["total"]
-    active = stats["active"]
-    completed = stats["completed"]
-    rate = stats["completion_rate"]
-
-    progress_bar_length = 10
-    filled = int(round(progress_bar_length * (rate / 100))) if total > 0 else 0
-    bar = "🟩" * filled + "⬜" * (progress_bar_length - filled)
-
-    text = (
-        "📊 **Твоя статистика продуктивности:**\n\n"
-        f"• Всего задач: **{total}**\n"
-        f"• Активных: **{active}**\n"
-        f"• Завершённых: **{completed}**\n\n"
-        f"Прогресс: **{rate}%**\n"
-        f"{bar}\n\n"
-        "Так держать! 💪"
-    )
-    await message.answer(text, parse_mode="Markdown")
-
-
-# --- COMPLETED HISTORY ---
-
-@router.message(F.text == "📜 Выполненные")
-async def show_completed_history(message: Message):
-    user_id = message.from_user.id
-    completed_tasks = database.get_completed_tasks(user_id, limit=10)
-
-    if not completed_tasks:
-        await message.answer("У тебя пока нет завершённых задач. Время что-нибудь сделать! 🚀")
+@router.message(F.text)
+async def handle_text_search(message: Message):
+    query = message.text.strip()
+    if not query:
         return
+    await search_and_respond(message, query)
 
-    lines = ["📜 **Последние выполненные задачи:**\n"]
-    for t in completed_tasks:
-        date = t.get("completed_at", "")[:10]
-        lines.append(f"✓ {t['title']} _({date})_")
 
-    await message.answer("\n".join(lines), parse_mode="Markdown")
+# --- CALLBACK QUERY: DOWNLOAD & SEND TRACK ---
+
+@router.callback_query(F.data.startswith("play:"))
+async def cb_play_track(callback: CallbackQuery):
+    track_id = callback.data.split(":")[1]
+    await callback.answer("⏳ Скачиваю и подготавливаю трек...", show_alert=False)
+
+    chat_id = callback.message.chat.id
+    await callback.bot.send_chat_action(chat_id=chat_id, action=ChatAction.RECORD_VOICE)
+
+    progress_msg = await callback.message.reply("⚡️ Загрузка аудио... Пожалуйста, подожди несколько секунд.")
+
+    try:
+        track_info = await music_service.download_track(track_id)
+        if not track_info or not os.path.exists(track_info["file_path"]):
+            await progress_msg.edit_text("❌ Не удалось загрузить данный трек. Попробуй выбрать другой вариант из списка.")
+            return
+
+        file_path = track_info["file_path"]
+        title = track_info["title"]
+        performer = track_info["performer"]
+        duration = track_info["duration"]
+
+        audio_file = FSInputFile(file_path, filename=f"{title}.mp3")
+
+        await callback.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_DOCUMENT)
+        await callback.message.answer_audio(
+            audio=audio_file,
+            title=title,
+            performer=performer,
+            duration=duration,
+            caption="🎶 Приятного прослушивания!"
+        )
+
+        await progress_msg.delete()
+
+        # Clean up downloaded file to prevent filling disk
+        try:
+            if os.path.exists(file_path):
+                os.remove(file_path)
+        except Exception as e:
+            logger.warning(f"Error removing temporary file {file_path}: {e}")
+
+    except Exception as exc:
+        logger.error(f"Error sending audio: {exc}")
+        await progress_msg.edit_text("⚠️ Ошибка при обработке аудио. Попробуй еще раз позже.")
